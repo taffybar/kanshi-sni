@@ -4,7 +4,7 @@ module Kanshi.SNI
 
 import Control.Concurrent
 import Control.Concurrent.MVar
-import Control.Monad (void, forever)
+import Control.Monad (void, forever, when)
 import Data.String (fromString)
 import Data.Text (Text)
 import DBus
@@ -15,6 +15,8 @@ import qualified GI.GLib as GLib
 import qualified GI.Gio as Gio
 import qualified GI.Gio.Objects.Cancellable as Gio
 import qualified StatusNotifier.Watcher.Client as W
+import System.Directory (getXdgDirectory, XdgDirectory(..), doesDirectoryExist)
+import System.FSNotify (withManager, watchDir, Event(..))
 
 import Hyprland.Monitors
 import Kanshi.Config
@@ -78,6 +80,18 @@ startSNI = do
 
   -- Run GLib main loop in background thread
   void $ forkIO $ GLib.mainLoopRun mainLoop
+
+  -- Watch kanshi config for changes
+  configDir <- getXdgDirectory XdgConfig "kanshi"
+  dirExists <- doesDirectoryExist configDir
+  when dirExists $
+    void $ forkIO $ withManager $ \mgr -> do
+      void $ watchDir mgr configDir (const True) $ \event ->
+        case event of
+          Modified {} -> refreshState sniState
+          Added {} -> refreshState sniState
+          _ -> return ()
+      forever $ threadDelay maxBound
 
   -- Block forever on main thread
   forever $ threadDelay maxBound
