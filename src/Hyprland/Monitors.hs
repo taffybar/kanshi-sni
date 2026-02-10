@@ -1,0 +1,1 @@
+module Hyprland.Monitors where

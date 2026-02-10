@@ -1,0 +1,55 @@
+cabal-version: 2.4
+name:           kanshi-sni
+version:        0.1.0.0
+synopsis:       SNI tray icon for kanshi display profile management
+license:        BSD-3-Clause
+author:         Ivan Malison
+maintainer:     IvanMalison@gmail.com
+build-type:     Simple
+
+library
+  exposed-modules:
+      Kanshi.Config
+      Kanshi.Varlink
+      Kanshi.SNI
+      Hyprland.Monitors
+      Menu
+  hs-source-dirs: src
+  default-extensions:
+      OverloadedStrings
+      RecordWildCards
+      ScopedTypeVariables
+      LambdaCase
+  build-depends:
+      base >= 4.7 && < 5
+    , aeson
+    , bytestring
+    , containers
+    , dbus >= 1.2.1 && < 2.0.0
+    , directory
+    , filepath
+    , fsnotify
+    , gi-dbusmenu
+    , gi-gio
+    , gi-glib
+    , hslogger
+    , megaparsec
+    , network
+    , process
+    , status-notifier-item >= 0.3.0.0
+    , text
+    , transformers
+  default-language: Haskell2010
+
+executable kanshi-sni
+  main-is: Main.hs
+  hs-source-dirs: app
+  default-extensions:
+      OverloadedStrings
+      RecordWildCards
+  ghc-options: -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      base >= 4.7 && < 5
+    , kanshi-sni
+    , hslogger
+  default-language: Haskell2010
