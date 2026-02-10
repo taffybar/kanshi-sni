@@ -39,6 +39,7 @@ library
     , status-notifier-item >= 0.3.0.0
     , text
     , transformers
+    , unix
   default-language: Haskell2010
 
 executable kanshi-sni
