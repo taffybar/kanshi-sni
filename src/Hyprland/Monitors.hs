@@ -52,26 +52,30 @@ getMonitors = do
     Left err -> return $ Left $ "hyprctl failed: " ++ show err
     Right output -> return $ eitherDecode $ LBS.pack output
 
+-- | Run a hyprctl keyword command, catching exceptions
+hyprctlKeyword :: Text -> IO (Either String ())
+hyprctlKeyword args = do
+  result <- try $ callProcess "hyprctl" ["keyword", "monitor", T.unpack args]
+  return $ case (result :: Either IOException ()) of
+    Left err -> Left $ "hyprctl failed: " ++ show err
+    Right () -> Right ()
+
 -- | Set monitor to a specific mode string like "2560x1600@240Hz"
-setMonitorMode :: Text -> Text -> IO ()
+setMonitorMode :: Text -> Text -> IO (Either String ())
 setMonitorMode name mode =
-  callProcess "hyprctl" ["keyword", "monitor",
-    T.unpack $ name <> "," <> mode <> ",auto,1"]
+  hyprctlKeyword $ name <> "," <> mode <> ",auto,1"
 
 -- | Set monitor scale
-setMonitorScale :: Text -> Double -> IO ()
+setMonitorScale :: Text -> Double -> IO (Either String ())
 setMonitorScale name scale =
-  callProcess "hyprctl" ["keyword", "monitor",
-    T.unpack $ name <> ",preferred,auto," <> T.pack (show scale)]
+  hyprctlKeyword $ name <> ",preferred,auto," <> T.pack (show scale)
 
 -- | Disable a monitor
-disableMonitor :: Text -> IO ()
+disableMonitor :: Text -> IO (Either String ())
 disableMonitor name =
-  callProcess "hyprctl" ["keyword", "monitor",
-    T.unpack $ name <> ",disabled"]
+  hyprctlKeyword $ name <> ",disabled"
 
 -- | Re-enable a monitor with preferred settings
-enableMonitor :: Text -> IO ()
+enableMonitor :: Text -> IO (Either String ())
 enableMonitor name =
-  callProcess "hyprctl" ["keyword", "monitor",
-    T.unpack $ name <> ",preferred,auto,1"]
+  hyprctlKeyword $ name <> ",preferred,auto,1"

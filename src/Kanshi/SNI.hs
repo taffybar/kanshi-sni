@@ -152,12 +152,30 @@ runOnGLibMain context action =
   GLib.mainContextInvokeFull (Just context) 4 $
     action >> return False
 
-handleSwitchProfile :: SNIState -> Text -> IO ()
-handleSwitchProfile sniState profile = do
+-- | Run a varlink action, recovering from stale connections by reconnecting
+withKanshiConn :: SNIState -> (KanshiConnection -> IO (Either KanshiError a)) -> IO ()
+withKanshiConn sniState action = do
   mConn <- readMVar (sniConnection sniState)
   case mConn of
     Nothing -> return ()
-    Just conn -> void $ kanshiSwitch conn profile
+    Just conn -> do
+      result <- action conn
+      case result of
+        Left _ -> resetConnection sniState
+        Right _ -> return ()
+
+resetConnection :: SNIState -> IO ()
+resetConnection sniState = do
+  mConn <- takeMVar (sniConnection sniState)
+  case mConn of
+    Just conn -> disconnectKanshi conn
+    Nothing -> return ()
+  newConn <- tryConnect
+  putMVar (sniConnection sniState) newConn
+
+handleSwitchProfile :: SNIState -> Text -> IO ()
+handleSwitchProfile sniState profile = do
+  withKanshiConn sniState $ \conn -> kanshiSwitch conn profile
   refreshState sniState
 
 handleReload :: SNIState -> IO ()
@@ -167,22 +185,26 @@ handleReload sniState = do
     Nothing -> do
       newConn <- tryConnect
       modifyMVar_ (sniConnection sniState) $ const $ return newConn
-    Just conn -> void $ kanshiReload conn
+    Just conn -> do
+      result <- kanshiReload conn
+      case result of
+        Left _ -> resetConnection sniState
+        Right _ -> return ()
   refreshState sniState
 
 handleSetMode :: SNIState -> Text -> Text -> IO ()
 handleSetMode sniState name mode = do
-  setMonitorMode name mode
+  void $ setMonitorMode name mode
   refreshState sniState
 
 handleSetScale :: SNIState -> Text -> Double -> IO ()
 handleSetScale sniState name scale = do
-  Hyprland.Monitors.setMonitorScale name scale
+  void $ Hyprland.Monitors.setMonitorScale name scale
   refreshState sniState
 
 handleToggleMonitor :: SNIState -> Text -> Bool -> IO ()
 handleToggleMonitor sniState name currentlyEnabled = do
-  if currentlyEnabled
+  void $ if currentlyEnabled
     then disableMonitor name
     else enableMonitor name
   refreshState sniState
