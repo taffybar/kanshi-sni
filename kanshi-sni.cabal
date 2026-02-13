@@ -14,6 +14,8 @@ library
       Kanshi.SNI
       Hyprland.Monitors
       Menu
+  other-modules:
+      DBus.Proxy
   hs-source-dirs: src
   default-extensions:
       OverloadedStrings
@@ -29,6 +31,7 @@ library
     , directory
     , filepath
     , fsnotify
+    , haskell-gi-base
     , gi-dbusmenu
     , gi-gio
     , gi-glib

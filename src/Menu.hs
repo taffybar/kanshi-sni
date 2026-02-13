@@ -10,11 +10,14 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import GI.Dbusmenu
 import Hyprland.Monitors (MonitorInfo(..))
+import Kanshi.Config (ProfileSpec(..), OutputSpec(..))
 
 data AppState = AppState
   { stateProfiles :: [Text]
   , stateCurrentProfile :: Maybe Text
+  , statePendingProfile :: Maybe Text
   , stateMonitors :: [MonitorInfo]
+  , stateProfileSpecs :: [ProfileSpec]
   , stateKanshiConnected :: Bool
   } deriving (Show)
 
@@ -31,45 +34,98 @@ buildMenu :: AppState -> MenuActions -> IO Menuitem
 buildMenu state actions = do
   root <- menuitemNew
 
-  if stateKanshiConnected state
-    then do
-      -- Header: current profile
-      header <- makeLabel $ case stateCurrentProfile state of
-        Just p -> "Profile: " <> p
-        Nothing -> "No active profile"
-      setEnabled header False
-      menuitemChildAppend root header
+  -- Header: current profile / status
+  let headerText =
+        if stateKanshiConnected state
+          then case (stateCurrentProfile state, statePendingProfile state) of
+            (Just p, Just pending) | pending /= p ->
+              "Profile: " <> p <> " (pending: " <> pending <> ")"
+            (Just p, _) -> "Profile: " <> p
+            (Nothing, Just pending) -> "No active profile (pending: " <> pending <> ")"
+            (Nothing, Nothing) -> "No active profile"
+          else "kanshi not connected"
+  header <- makeLabel headerText
+  setEnabled header False
+  menuitemChildAppend root header
 
-      addSeparator root
+  monitorsHeader <- makeLabel $ "Monitors: " <> T.pack (show (length (stateMonitors state)))
+  setEnabled monitorsHeader False
+  menuitemChildAppend root monitorsHeader
 
-      -- Profile list (radio items)
-      forM_ (stateProfiles state) $ \profile -> do
-        item <- makeLabel profile
-        setToggleType item "radio"
-        if stateCurrentProfile state == Just profile
-          then setToggleState item 1
-          else setToggleState item 0
-        void $ onMenuitemItemActivated item $ \_ ->
-          onSwitchProfile actions profile
-        menuitemChildAppend root item
+  addSeparator root
 
-      addSeparator root
+  -- Current monitor details (read-only)
+  when (not $ null $ stateMonitors state) $ do
+    currentSub <- makeLabel "Current Setup"
+    menuitemPropertySet currentSub "children-display" "submenu"
+    forM_ (stateMonitors state) $ \mon -> do
+      let monLabel =
+            monitorName mon <> ": " <>
+            T.pack (show (monitorWidth mon)) <> "x" <>
+            T.pack (show (monitorHeight mon)) <> "@" <>
+            T.pack (showFF (monitorRefreshRate mon)) <> "Hz" <>
+            " scale " <> T.pack (show (monitorScale mon)) <>
+            " pos " <> T.pack (show (monitorX mon)) <> "," <> T.pack (show (monitorY mon)) <>
+            (if monitorDisabled mon then " (disabled)" else "") <>
+            (if monitorFocused mon then " (focused)" else "")
+      item <- makeLabel monLabel
+      setEnabled item False
+      menuitemChildAppend currentSub item
+    void $ menuitemChildAppend root currentSub
 
-      -- Reload config
-      reloadItem <- makeLabel "Reload Config"
-      void $ onMenuitemItemActivated reloadItem $ \_ ->
-        onReloadConfig actions
-      menuitemChildAppend root reloadItem
+  -- Profile list (radio items) only makes sense when kanshi is connected.
+  when (stateKanshiConnected state) $ do
+    forM_ (stateProfiles state) $ \profile -> do
+      let outCount =
+            case filter (\p -> profileSpecName p == profile) (stateProfileSpecs state) of
+              (p:_) -> length (profileSpecOutputs p)
+              [] -> 0
+          label =
+            if outCount > 0
+              then profile <> " (" <> T.pack (show outCount) <> ")"
+              else profile
+      item <- makeLabel label
+      setToggleType item "radio"
+      if stateCurrentProfile state == Just profile
+        then setToggleState item 1
+        else setToggleState item 0
+      void $ onMenuitemItemActivated item $ \_ ->
+        onSwitchProfile actions profile
+      menuitemChildAppend root item
 
-    else do
-      disconnected <- makeLabel "kanshi not connected"
-      setEnabled disconnected False
-      menuitemChildAppend root disconnected
+  -- Profile details always shown (useful even when kanshi isn't running).
+  when (not $ null $ stateProfileSpecs state) $ do
+    details <- makeLabel "Profile Details"
+    menuitemPropertySet details "children-display" "submenu"
+    forM_ (stateProfileSpecs state) $ \spec -> do
+      specItem <- makeLabel $ profileSpecName spec <> " (" <> T.pack (show (length (profileSpecOutputs spec))) <> ")"
+      menuitemPropertySet specItem "children-display" "submenu"
+      activate <- makeLabel "Activate"
+      if stateKanshiConnected state
+        then void $ onMenuitemItemActivated activate $ \_ ->
+          onSwitchProfile actions (profileSpecName spec)
+        else setEnabled activate False
+      menuitemChildAppend specItem activate
+      forM_ (profileSpecOutputs spec) $ \out -> do
+        let outLabel =
+              outputTarget out <>
+              maybe "" (\b -> if b then " enable" else " disable") (outputEnabled out) <>
+              maybe "" (\m -> " mode " <> m) (outputMode out) <>
+              maybe "" (\(x,y) -> " pos " <> T.pack (show x) <> "," <> T.pack (show y)) (outputPosition out) <>
+              maybe "" (\s -> " scale " <> T.pack (show s)) (outputScale out)
+        outItem <- makeLabel outLabel
+        setEnabled outItem False
+        menuitemChildAppend specItem outItem
+      menuitemChildAppend details specItem
+    void $ menuitemChildAppend root details
 
-      retryItem <- makeLabel "Retry Connection"
-      void $ onMenuitemItemActivated retryItem $ \_ ->
-        onReloadConfig actions
-      menuitemChildAppend root retryItem
+  addSeparator root
+
+  -- Reload config / retry connection
+  reloadItem <- makeLabel $ if stateKanshiConnected state then "Reload Config" else "Retry Connection"
+  void $ onMenuitemItemActivated reloadItem $ \_ ->
+    onReloadConfig actions
+  menuitemChildAppend root reloadItem
 
   -- Monitor submenus (always shown when monitors are available)
   when (not $ null $ stateMonitors state) $ do
@@ -84,10 +140,15 @@ buildMenu state actions = do
 -- enable/disable controls.
 buildMonitorSubmenu :: MonitorInfo -> MenuActions -> IO Menuitem
 buildMonitorSubmenu mon actions = do
-  let label = monitorName mon <> " (" <>
-              T.pack (show (monitorWidth mon)) <> "x" <>
-              T.pack (show (monitorHeight mon)) <> " @ " <>
-              T.pack (show (monitorScale mon)) <> "x)"
+  let label =
+        monitorName mon <> " (" <>
+        T.pack (show (monitorWidth mon)) <> "x" <>
+        T.pack (show (monitorHeight mon)) <> "@" <>
+        T.pack (showFF (monitorRefreshRate mon)) <> "Hz" <>
+        " scale " <> T.pack (show (monitorScale mon)) <>
+        " pos " <> T.pack (show (monitorX mon)) <> "," <> T.pack (show (monitorY mon)) <>
+        (if monitorDisabled mon then " disabled" else "") <>
+        ")"
   parent <- makeLabel label
   menuitemPropertySet parent "children-display" "submenu"
 
