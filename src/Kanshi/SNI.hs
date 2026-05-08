@@ -7,6 +7,7 @@ import Control.Concurrent.MVar
 import Control.Exception (SomeException, catch)
 import Control.Monad (forever, void, when)
 import Data.Int (Int32)
+import qualified Data.Map.Strict as Map
 import Data.String (fromString)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -28,6 +29,7 @@ import Foreign.StablePtr
   , castPtrToStablePtr
   )
 import System.Directory (XdgDirectory(..), doesDirectoryExist, getXdgDirectory)
+import System.FilePath (takeFileName)
 import System.FSNotify (Event(..), withManager, watchDir)
 import System.IO.Unsafe (unsafePerformIO)
 
@@ -42,9 +44,14 @@ import Menu
 data SNIState = SNIState
   { sniConnection :: MVar (Maybe KanshiConnection)
   , sniAppState :: MVar AppState
+  , sniMenuRoot :: MVar Dbusmenu.Menuitem
+  , sniMenuActions :: MVar ActivationMap
   , sniMenuServer :: Dbusmenu.Server
   , sniGLibContext :: GLib.MainContext
   }
+
+refreshIntervalMicros :: Int
+refreshIntervalMicros = 5 * 1000000
 
 startSNI :: IO ()
 startSNI = do
@@ -73,11 +80,17 @@ startSNI = do
   appState <- buildInitialState kanshiConn
   connVar <- newMVar kanshiConn
   stateVar <- newMVar appState
+  initialRoot <- Dbusmenu.menuitemNew
+  rootVar <- newMVar initialRoot
+  actionVar <- newMVar Map.empty
 
-  let sniState = SNIState connVar stateVar menuServer context
+  let sniState = SNIState connVar stateVar rootVar actionVar menuServer context
 
   -- Build initial menu
   rebuildMenu sniState
+
+  void $ Dbusmenu.onServerItemActivationRequested menuServer $ \itemId _timestamp ->
+    dispatchMenuAction sniState itemId
 
   -- Export SNI on the main bus name.
   exportSNI client busName path menuPath
@@ -96,12 +109,17 @@ startSNI = do
   dirExists <- doesDirectoryExist configDir
   when dirExists $
     void $ forkIO $ withManager $ \mgr -> do
-      void $ watchDir mgr configDir (const True) $ \event ->
+      void $ watchDir mgr configDir (\event -> takeFileName (eventPath event) == "config") $ \event ->
         case event of
-          Modified {} -> refreshState sniState
-          Added {} -> refreshState sniState
+          Modified {} -> safeRefreshState sniState
+          Added {} -> safeRefreshState sniState
+          Removed {} -> safeRefreshState sniState
           _ -> pure ()
       forever $ threadDelay maxBound
+
+  void $ forkIO $ forever $ do
+    threadDelay refreshIntervalMicros
+    safeRefreshState sniState
 
   -- Block forever on main thread
   forever $ threadDelay maxBound
@@ -167,13 +185,42 @@ rebuildMenu sniState = do
           , onSetScale = handleSetScale sniState
           , onToggleMonitor = handleToggleMonitor sniState
           }
-  newRoot <- buildMenu state actions
+  (newRoot, newActions) <- buildMenu state actions
+  modifyMVar_ (sniMenuRoot sniState) $ const (pure newRoot)
+  modifyMVar_ (sniMenuActions sniState) $ const (pure newActions)
   runOnGLibMain (sniGLibContext sniState) $
     Dbusmenu.serverSetRoot (sniMenuServer sniState) newRoot
 
+dispatchMenuAction :: SNIState -> Int32 -> IO ()
+dispatchMenuAction sniState itemId = do
+  actions <- readMVar (sniMenuActions sniState)
+  case Map.lookup itemId actions of
+    Nothing -> pure ()
+    Just action -> void $ forkIO action
+
+safeRefreshState :: SNIState -> IO ()
+safeRefreshState sniState =
+  refreshState sniState `catch` \(_ :: SomeException) -> do
+    resetConnection sniState `catch` \(_ :: SomeException) -> pure ()
+    refreshState sniState `catch` \(_ :: SomeException) -> pure ()
+
+ensureUsableConnection :: Maybe KanshiConnection -> IO (Maybe KanshiConnection)
+ensureUsableConnection mConn =
+  case mConn of
+    Nothing -> tryConnect
+    Just conn -> do
+      statusResult <- kanshiStatus conn
+      case statusResult of
+        Right _ -> pure (Just conn)
+        Left _ -> do
+          disconnectKanshi conn
+          tryConnect
+
 refreshState :: SNIState -> IO ()
 refreshState sniState = do
-  mConn <- readMVar (sniConnection sniState)
+  mConn <- modifyMVar (sniConnection sniState) $ \currentConn -> do
+    freshConn <- ensureUsableConnection currentConn
+    pure (freshConn, freshConn)
   newState <- buildInitialState mConn
   modifyMVar_ (sniAppState sniState) $ const (pure newState)
   rebuildMenu sniState

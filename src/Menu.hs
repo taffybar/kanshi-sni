@@ -1,11 +1,15 @@
 module Menu
   ( AppState(..)
   , MenuActions(..)
+  , ActivationMap
   , buildMenu
   ) where
 
 import Control.Monad (forM_, when, void)
 import Data.Int (Int32)
+import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
 import GI.Dbusmenu
@@ -29,9 +33,12 @@ data MenuActions = MenuActions
   , onToggleMonitor :: Text -> Bool -> IO ()
   }
 
+type ActivationMap = Map Int32 (IO ())
+
 -- | Build a complete DBusMenu tree from the current application state.
-buildMenu :: AppState -> MenuActions -> IO Menuitem
+buildMenu :: AppState -> MenuActions -> IO (Menuitem, ActivationMap)
 buildMenu state actions = do
+  activationMapRef <- newIORef Map.empty
   root <- menuitemNew
 
   -- Header: current profile / status
@@ -89,7 +96,7 @@ buildMenu state actions = do
       if stateCurrentProfile state == Just profile
         then setToggleState item 1
         else setToggleState item 0
-      void $ onMenuitemItemActivated item $ \_ ->
+      registerAction activationMapRef item $
         onSwitchProfile actions profile
       menuitemChildAppend root item
 
@@ -102,7 +109,7 @@ buildMenu state actions = do
       menuitemPropertySet specItem "children-display" "submenu"
       activate <- makeLabel "Activate"
       if stateKanshiConnected state
-        then void $ onMenuitemItemActivated activate $ \_ ->
+        then registerAction activationMapRef activate $
           onSwitchProfile actions (profileSpecName spec)
         else setEnabled activate False
       menuitemChildAppend specItem activate
@@ -123,7 +130,7 @@ buildMenu state actions = do
 
   -- Reload config / retry connection
   reloadItem <- makeLabel $ if stateKanshiConnected state then "Reload Config" else "Retry Connection"
-  void $ onMenuitemItemActivated reloadItem $ \_ ->
+  registerAction activationMapRef reloadItem $
     onReloadConfig actions
   menuitemChildAppend root reloadItem
 
@@ -131,15 +138,16 @@ buildMenu state actions = do
   when (not $ null $ stateMonitors state) $ do
     addSeparator root
     forM_ (stateMonitors state) $ \mon -> do
-      monitorSubmenu <- buildMonitorSubmenu mon actions
+      monitorSubmenu <- buildMonitorSubmenu activationMapRef mon actions
       menuitemChildAppend root monitorSubmenu
 
-  return root
+  activationMap <- readIORef activationMapRef
+  return (root, activationMap)
 
 -- | Build a submenu for a single monitor with resolution, scale, and
 -- enable/disable controls.
-buildMonitorSubmenu :: MonitorInfo -> MenuActions -> IO Menuitem
-buildMonitorSubmenu mon actions = do
+buildMonitorSubmenu :: IORef ActivationMap -> MonitorInfo -> MenuActions -> IO Menuitem
+buildMonitorSubmenu activationMapRef mon actions = do
   let label =
         monitorName mon <> " (" <>
         T.pack (show (monitorWidth mon)) <> "x" <>
@@ -154,7 +162,7 @@ buildMonitorSubmenu mon actions = do
 
   -- Enable/Disable toggle
   toggle <- makeLabel $ if monitorDisabled mon then "Enable" else "Disable"
-  void $ onMenuitemItemActivated toggle $ \_ ->
+  registerAction activationMapRef toggle $
     onToggleMonitor actions (monitorName mon) (not $ monitorDisabled mon)
   menuitemChildAppend parent toggle
 
@@ -171,7 +179,7 @@ buildMonitorSubmenu mon actions = do
     if mode == currentMode
       then setToggleState modeItem 1
       else setToggleState modeItem 0
-    void $ onMenuitemItemActivated modeItem $ \_ ->
+    registerAction activationMapRef modeItem $
       onSetMode actions (monitorName mon) mode
     menuitemChildAppend resParent modeItem
   menuitemChildAppend parent resParent
@@ -185,7 +193,7 @@ buildMonitorSubmenu mon actions = do
     if abs (monitorScale mon - s) < 0.01
       then setToggleState scaleItem 1
       else setToggleState scaleItem 0
-    void $ onMenuitemItemActivated scaleItem $ \_ ->
+    registerAction activationMapRef scaleItem $
       onSetScale actions (monitorName mon) s
     menuitemChildAppend scaleParent scaleItem
   menuitemChildAppend parent scaleParent
@@ -206,6 +214,7 @@ makeLabel :: Text -> IO Menuitem
 makeLabel text = do
   item <- menuitemNew
   menuitemPropertySet item "label" text
+  setEnabled item True
   return item
 
 addSeparator :: Menuitem -> IO ()
@@ -226,3 +235,8 @@ setToggleType item toggleType =
 setToggleState :: Menuitem -> Int32 -> IO ()
 setToggleState item toggleState =
   void $ menuitemPropertySetInt item "toggle-state" toggleState
+
+registerAction :: IORef ActivationMap -> Menuitem -> IO () -> IO ()
+registerAction activationMapRef item action = do
+  itemId <- menuitemGetId item
+  modifyIORef' activationMapRef (Map.insert itemId action)

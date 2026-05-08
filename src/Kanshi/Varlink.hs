@@ -68,11 +68,16 @@ disconnectKanshi (KanshiConnection sock) = close sock
 
 varlinkCall :: KanshiConnection -> Value -> IO (Either KanshiError Value)
 varlinkCall (KanshiConnection sock) request = do
-  sendAll sock $ LBS.toStrict (encode request) <> BS.singleton 0
-  response <- recvUntilNull sock
-  case eitherDecodeStrict response of
-    Left err -> return $ Left $ ProtocolError $ "JSON decode error: " ++ err
-    Right val -> return $ parseVarlinkResponse val
+  result <- try $ do
+    sendAll sock $ LBS.toStrict (encode request) <> BS.singleton 0
+    recvUntilNull sock
+  case (result :: Either IOException BS.ByteString) of
+    Left err ->
+      return $ Left $ ConnectionFailed $ "Socket I/O failed: " ++ show err
+    Right response ->
+      case eitherDecodeStrict response of
+        Left err -> return $ Left $ ProtocolError $ "JSON decode error: " ++ err
+        Right val -> return $ parseVarlinkResponse val
 
 recvUntilNull :: Socket -> IO BS.ByteString
 recvUntilNull sock = go BS.empty
